@@ -12,7 +12,7 @@ default_args = {
 }
 
 # BLOCK1: Built-in Pythoncallables
-def postgres_destination_load_data(conn_id: str, file_folder: str, file_name: str, table: str):
+def load_data_to_postgres(conn_id: str, file_folder:str, file_name: str, table: str):
     """
     * Main infomation:
     Name: postgres_destination_load_data
@@ -40,8 +40,9 @@ def postgres_destination_load_data(conn_id: str, file_folder: str, file_name: st
 
 # BLOCK2: Config Parameters and Execute Pythoncallables
 def exec_olist_postgres_destination_load_data():
-    if 1 != 0:
-        postgres_destination_load_data(conn_id='my_postgres_id', file_folder='Olist', file_name='Customers.csv', table='Customers')
+    __name__ = '__main__' # Run this when meet the Error: Pythoncallable is not callable
+    if __name__ == '__main__':
+        load_data_to_postgres(conn_id='my_postgres_db', file_folder='Olist', file_name='Customers.csv', table='Customers')
 
 with DAG('postgres_destination_load_data', schedule_interval='0 0 * * *', default_args=default_args, catchup=False) as dag:
     postgres_destination_load_data = PythonOperator(
