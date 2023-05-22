@@ -45,7 +45,7 @@ def mongo_connector_extract_data(conn_id:str, collection:str, query:dict, projec
     data_csv.head()
     data_csv.to_csv(path_or_buf=output_file, index=False)
 
-# BLOCK2: Config Parameters Pythoncallables
+# BLOCK2: Config Parameters and Execute Pythoncallables
 def exec_olist_mongo_connector_extract_data():
     if __name__ == '__main__':
         mongo_connector_extract_data(conn_id='my_mongodb', collection='Customers', query={}, projection={ "_id": 0},
