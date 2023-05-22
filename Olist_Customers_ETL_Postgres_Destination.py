@@ -26,7 +26,7 @@ def load_data_to_postgres(conn_id: str, file_folder: str, file_name: str, table:
 # BLOCK2: Config Parameters Pythoncallables
 def exec_olist_postgres_destination_load_data():
     if 1 != 0:
-        load_data_to_postgres()
+        load_data_to_postgres(conn_id='my_postgres_id', file_folder='Olist', file_name='Customers.csv', table='Customers')
 
 with DAG('postgres_destination_load_data', schedule_interval='0 0 * * *', default_args=default_args, catchup=False) as dag:
     postgres_destination_load_data = PythonOperator(
