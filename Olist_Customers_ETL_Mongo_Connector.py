@@ -12,8 +12,12 @@ default_args = {
 }
 
 # BLOCK1: Built-in Pythoncallables
-def mongo_connector_extract_data(conn_id:str, collection:str, query:dict, projection:dict,
-    output_file_path:str):
+def mongo_connector_extract_data():
+    conn_id='my_mongodb'
+    collection='Customers'
+    query={}
+    projection={ "_id": 0}
+    output_file_path='/opt/airflow/dags/Datafile/Inputfile/Olist/Customers.csv'
     """
     * Main infomation:
     Name: mongo_connector_extract_data
@@ -45,17 +49,11 @@ def mongo_connector_extract_data(conn_id:str, collection:str, query:dict, projec
     data_csv.head()
     data_csv.to_csv(path_or_buf=output_file, index=False)
 
-# BLOCK2: Config Parameters and Execute Pythoncallables
-def exec_olist_mongo_connector_extract_data():
-    __name__ = '__main__'
-    if __name__ == '__main__':
-        mongo_connector_extract_data(conn_id='my_mongodb', collection='Customers', query={}, projection={ "_id": 0},
-                                output_file_path='/opt/airflow/dags/Datafile/Inputfile/Olist/Customers.csv')
-
+# BLOCK2: Build DAGs
 with DAG('mongo_connector_extract_data', schedule_interval='0 0 * * *', default_args=default_args, catchup=False) as dag:
     mongo_connector_extract_data = PythonOperator(
         task_id='mongo_connector_extract_data',
-        python_callable=exec_olist_mongo_connector_extract_data
+        python_callable=mongo_connector_extract_data
     )
 
     mongo_connector_extract_data
