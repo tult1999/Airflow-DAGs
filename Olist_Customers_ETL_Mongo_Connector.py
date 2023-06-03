@@ -1,4 +1,5 @@
 import json
+import csv
 import pandas as pd
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -43,11 +44,12 @@ def mongo_connector_extract_data():
     # Convert records to a list of dictionaries
     data = [record for record in records]
 
-    # Convert the list of dictionaries to a Pandas Dataframe
-    output_file = output_file_path
-    data_csv = pd.DataFrame(data)
-    data_csv.head()
-    data_csv.to_csv(path_or_buf=output_file, index=False)
+    # Import the list of dictionaries directly to a csv file
+    field_name = list(set().union(*[d.keys() for d in data]))
+    with open(output_file_path, 'w', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=field_name)
+        writer.writeheader()
+        writer.writerows(data)
 
 # BLOCK2: Build DAGs
 with DAG('mongo_connector_extract_data', schedule_interval='0 0 * * *', default_args=default_args, catchup=False) as dag:
