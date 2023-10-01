@@ -1,0 +1,218 @@
+import json
+import csv
+import pandas as pd
+import numpy as np
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+import datetime
+from datetime import datetime, timedelta
+import requests
+import psycopg2
+
+default_args = {
+    'start_date': datetime(2023, 9, 30),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
+
+# BLOCK1: Built-in Pythoncallables
+def pandas_get_data_kiotviet(**kwargs):
+
+    #### Input here! ####
+    client_id = '185f55ca-f98f-40ba-aeab-3d1993526fe8'
+    client_secret = '11E95131B009BEAE50A7FC967FB0D68FF1D86727'
+    kiotviet_store_name = 'tuuushirt'
+    ####
+
+    """
+    *********** FUNCTION GUIDELINES ***********
+    * Main infomation:
+    Name: pandas_get_data_kiotviet
+    Used for: Get data from a KiotViet POS system into a Pandas Dataframe
+    Conditions to use: 
+        (1) Connection already set-up on Apache Airflow, you can check on the Airflow server with the command 'airflow connections list'
+        (2) PostgreSQL Database server is on
+        (3) The connection works fine
+
+    * Parameters:
+    param client_id: this is a unique string for each individual shop owner on KiotViet POS system, you need to get this info on KiotViet UI (configue store)
+    param client_secret: this is a security string for each individual shop owner on KiotViet POS system, you need to get this info on KiotViet UI (configue store)
+    param kiotviet_store_name: the store name displayed on UI
+    """
+
+    #### Default Code ####
+    ## Call API to get Access Token ##
+    # Input endpoint and pre-condition
+    api_endpoint = 'https://id.kiotviet.vn/connect/token'
+    body = f'scopes=PublicApi.Access&grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}'
+
+    # Set up the headers with the authentication token
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+
+    # Make a POST request to the KiotViet API
+    response = requests.post(api_endpoint, data=body, headers=headers)
+
+    # API call was successful, parse and use the response data
+    data = response.json()
+
+    # Get the Access Token
+    access_token = data['access_token']
+
+    ## Call API to get data Customer ##
+    # Input endpoint and pre-condition
+    api_endpoint = 'https://public.kiotapi.com/customers'
+    api_key = access_token
+
+    # Set up the headers with the authentication token
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Retailer': f'{kiotviet_store_name}'
+    }
+
+    # Make a GET request to the KiotViet API
+    response = requests.get(api_endpoint, headers=headers)
+
+    # API call was successful, parse and use the response data
+    data = response.json()
+
+    # Get the data customer into a variable
+    customer_data = data['data']
+
+    # Get data customer into Pandas DataFrame
+    df_customer = pd.DataFrame(customer_data)
+
+    # Rename columns to match columns name on database server
+    df_customer = df_customer.rename(columns=
+                                    {
+                                        'id': 'customer_id',
+                                        'name': 'customer_name',
+                                        'createdDate': 'customer_date',
+                                        'birthDate': 'birthday',
+                                        'gender': 'gender',
+                                        'contactNumber': 'phone',
+                                        'email': 'email'
+                                    }
+                                    )
+
+    # Parse all the datetime columns from string to datetime data type
+    df_customer['customer_date'] = pd.to_datetime(df_customer['customer_date'])
+    df_customer['birthday'] = pd.to_datetime(df_customer['birthday'])
+
+    # Drop unnecessary columns
+    df_customer = df_customer[['customer_id', 'customer_name', 'customer_date', 'birthday', 'gender', 'phone', 'email']]
+    ####
+
+    #### Configure Output Code ####
+    # Assign output to other dataframe
+    pd_df_api_customer_fashion_kiotviet = df_customer
+
+    # Push the output data into a temporary stage
+    kwargs['ti'].xcom_push(key='pandas_get_data_kiotviet_result_data', value=pd_df_api_customer_fashion_kiotviet)
+    ####
+
+def postgres_push_data_pandas(**kwargs):
+
+    #### Input here! ####
+    table='customer'
+    conn_id='postgres_db_server_fashion_kiotviet'
+    ####
+
+    """
+    *********** FUNCTION GUIDELINES ***********
+    * Main infomation:
+    Name: postgres_push_data_pandas
+    Used for: Push data from a Pandas Dataframe to the corresponding Postgres table
+    Conditions to use: 
+        (1) Connection already set-up on Apache Airflow, you can check on the Airflow server with the command 'airflow connections list'
+        (2) PostgreSQL Database server is on
+        (3) The connection works fine
+
+    * Parameters:
+    param df_to_append: the input dataframe contains the data that need to be push into Postgres table
+    param conn_id: The connection ID of the connection established between Apache Airflow server and PostgreSQL Database
+    param table: the table to push data in
+    """
+
+    #### Default Code ####
+    # Get the result of previous task
+    ti = kwargs['ti']
+    pd_df_api_customer_fashion_kiotviet = ti.xcom_pull(task_ids='pandas_get_data_kiotviet', key='pandas_get_data_kiotviet_result_data')
+    df_to_append = pd_df_api_customer_fashion_kiotviet
+
+    # Configure the input dataframe to append
+    # Fixing the boolean field
+    df_to_append['gender'] = df_to_append['gender'].astype(str)
+    df_to_append['gender'] = np.where(df_to_append['gender'].str.contains('True') == True,
+                                    'Male',
+                                    np.where(df_to_append['gender'].str.contains('False') == True,
+                                            'Female',
+                                            'NaN')
+                                    )
+
+    # Init connection
+    pg_hook = PostgresHook(postgres_conn_id=conn_id)
+    conn = pg_hook.get_conn()
+    cursor = conn.cursor()
+
+    # Iterate through rows in the DataFrame and perform upsert
+    for index, row in df_to_append.iterrows():
+        # Define the SQL query for upsert
+        upsert_query = f"""
+            INSERT INTO customer (customer_id, customer_name, customer_date, birthday, gender, phone, email)
+            VALUES (%s, 
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END,
+                    %s,
+                    CASE WHEN %s = '1900-01-01 00:00:00'::timestamp THEN NULL ELSE %s END,
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END,
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END,
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END)
+            ON CONFLICT (customer_id) DO UPDATE
+            SET customer_name = EXCLUDED.customer_name,
+                customer_date = EXCLUDED.customer_date,
+                birthday = CASE WHEN EXCLUDED.birthday = '1900-01-01 00:00:00'::timestamp THEN NULL ELSE EXCLUDED.birthday END,
+                gender = CASE WHEN EXCLUDED.gender = 'NaN' THEN NULL ELSE EXCLUDED.gender END,
+                phone = CASE WHEN EXCLUDED.phone = 'NaN' THEN NULL ELSE EXCLUDED.phone END,
+                email = CASE WHEN EXCLUDED.email = 'NaN' THEN NULL ELSE EXCLUDED.email END
+            ;
+        """
+
+        # Handle NaT values by converting them to None
+        customer_date = row['customer_date']
+        if pd.isna(customer_date):
+            customer_date = pd.Timestamp(1900, 1, 1)
+        
+        # Handle NaT values by converting them to None
+        birthday = row['birthday']
+        if pd.isna(birthday):
+            birthday = pd.Timestamp(1900, 1, 1)
+        
+        # Execute the upsert query
+        cursor.execute(upsert_query, (row['customer_id'], row['customer_name'], row['customer_name'], customer_date, birthday, birthday, row['gender'], row['gender'], row['phone'], row['phone'], row['email'], row['email']))
+
+    # Commit changes to the database
+    conn.commit()
+
+    # Close the cursor and the PostgreSQL connection
+    cursor.close()
+    conn.close()
+    ####
+
+    #### Configure Output Code ####
+    ####
+
+# BLOCK2: Build DAGs
+with DAG('integration_kiotviet_dataflow', schedule_interval='0 0 * * *', default_args=default_args, catchup=False) as dag:
+    pandas_get_data_kiotviet = PythonOperator(
+        task_id='pandas_get_data_kiotviet',
+        python_callable=pandas_get_data_kiotviet
+    )
+
+    postgres_push_data_pandas = PythonOperator(
+        task_id='postgres_push_data_pandas',
+        python_callable=postgres_push_data_pandas
+    )
+
+    pandas_get_data_kiotviet >> postgres_push_data_pandas
