@@ -1,3 +1,4 @@
+# Import libs
 import json
 import csv
 import pandas as pd
@@ -15,7 +16,7 @@ from pytz import timezone
 desired_timezone = timezone('Asia/Ho_Chi_Minh')
 
 default_args = {
-    'start_date': datetime(2023, 10, 2, tzinfo=desired_timezone),
+    'start_date': datetime(2023, 10, 1, tzinfo=desired_timezone),
     'end_date': None,
     'retries': 5,
     'retry_delay': timedelta(minutes=10)
@@ -81,16 +82,34 @@ def pandas_get_data_kiotviet(**kwargs):
     response = requests.get(api_endpoint, headers=headers)
 
     # API call was successful, parse and use the response data
-    data = response.json()
+    json_data = response.json()
 
-    # Get the data customer into a variable
-    customer_data = data['data']
+    # Get the json data into a list of dictionary variable
+    json_dict_data = json_data['data']
 
-    # Get data customer into Pandas DataFrame
-    df_customer = pd.DataFrame(customer_data)
+    # Get data into Pandas DataFrame
+    df_data = pd.DataFrame(json_dict_data)
+
+    #### Configure Output Code ####
+    # Assign output to other dataframe
+    output_df = df_data
+
+    # Push the output data into a temporary stage
+    kwargs['ti'].xcom_push(key='pandas_get_data_kiotviet', value=output_df)
+    ####
+
+def custom_pandas_transform_data(**kwargs):
+
+    #### Custom dataframe here! ####
+    # Get the result of previous task
+    ti = kwargs['ti']
+    pandas_get_data_kiotviet = ti.xcom_pull(task_ids='pandas_get_data_kiotviet', key='pandas_get_data_kiotviet')
+
+    # Assign to an input dataframe
+    input_df = pandas_get_data_kiotviet
 
     # Rename columns to match columns name on database server
-    df_customer = df_customer.rename(columns=
+    transforming_df = input_df.rename(columns=
                                     {
                                         'id': 'customer_id',
                                         'name': 'customer_name',
@@ -103,20 +122,28 @@ def pandas_get_data_kiotviet(**kwargs):
                                     )
 
     # Parse all the datetime columns from string to datetime data type
-    df_customer['customer_date'] = pd.to_datetime(df_customer['customer_date'])
-    df_customer['birthday'] = pd.to_datetime(df_customer['birthday'])
+    transforming_df['customer_date'] = pd.to_datetime(transforming_df['customer_date'])
+    transforming_df['birthday'] = pd.to_datetime(transforming_df['birthday'])
 
     # Drop unnecessary columns
-    df_customer = df_customer[['customer_id', 'customer_name', 'customer_date', 'birthday', 'gender', 'phone', 'email']]
+    transforming_df = transforming_df[['customer_id', 'customer_name', 'customer_date', 'birthday', 'gender', 'phone', 'email']]
+
+    # Fixing the boolean field
+    transforming_df['gender'] = transforming_df['gender'].astype(str)
+    transforming_df['gender'] = np.where(transforming_df['gender'].str.contains('True') == True,
+                                    'Male',
+                                    np.where(transforming_df['gender'].str.contains('False') == True,
+                                            'Female',
+                                            'NaN')
+                                    )
     ####
 
     #### Configure Output Code ####
     # Assign output to other dataframe
-    pd_df_api_customer_fashion_kiotviet = df_customer
+    output_df = transforming_df
 
     # Push the output data into a temporary stage
-    kwargs['ti'].xcom_push(key='pandas_get_data_kiotviet_result_data', value=pd_df_api_customer_fashion_kiotviet)
-    ####
+    kwargs['ti'].xcom_push(key='custom_pandas_transform_data', value=output_df)
 
 def postgres_push_data_pandas(**kwargs):
 
@@ -144,18 +171,10 @@ def postgres_push_data_pandas(**kwargs):
     #### Default Code ####
     # Get the result of previous task
     ti = kwargs['ti']
-    pd_df_api_customer_fashion_kiotviet = ti.xcom_pull(task_ids='pandas_get_data_kiotviet', key='pandas_get_data_kiotviet_result_data')
-    df_to_append = pd_df_api_customer_fashion_kiotviet
+    custom_pandas_transform_data = ti.xcom_pull(task_ids='custom_pandas_transform_data', key='custom_pandas_transform_data')
 
-    # Configure the input dataframe to append
-    # Fixing the boolean field
-    df_to_append['gender'] = df_to_append['gender'].astype(str)
-    df_to_append['gender'] = np.where(df_to_append['gender'].str.contains('True') == True,
-                                    'Male',
-                                    np.where(df_to_append['gender'].str.contains('False') == True,
-                                            'Female',
-                                            'NaN')
-                                    )
+    # Assign to an input dataframe
+    df_to_append = custom_pandas_transform_data
 
     # Init connection
     pg_hook = PostgresHook(postgres_conn_id=conn_id)
@@ -220,10 +239,15 @@ def postgres_push_data_pandas(**kwargs):
     ####
 
 # BLOCK2: Build DAGs
-with DAG('integration_kiotviet_dataflow', schedule_interval='30 5 * * *', default_args=default_args, catchup=False) as dag:
+with DAG('intergration_dataflow_kiotviet__customer__', schedule_interval='30 5 * * *', default_args=default_args, catchup=False) as dag:
     pandas_get_data_kiotviet = PythonOperator(
         task_id='pandas_get_data_kiotviet',
         python_callable=pandas_get_data_kiotviet
+    )
+
+    custom_pandas_transform_data = PythonOperator(
+        task_id='custom_pandas_transform_data',
+        python_callable=custom_pandas_transform_data
     )
 
     postgres_push_data_pandas = PythonOperator(
@@ -231,4 +255,4 @@ with DAG('integration_kiotviet_dataflow', schedule_interval='30 5 * * *', defaul
         python_callable=postgres_push_data_pandas
     )
 
-    pandas_get_data_kiotviet >> postgres_push_data_pandas
+    pandas_get_data_kiotviet >> custom_pandas_transform_data >> postgres_push_data_pandas
