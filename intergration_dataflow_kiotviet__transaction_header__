@@ -1,0 +1,265 @@
+# Import libs
+import json
+import csv
+import pandas as pd
+import numpy as np
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+import datetime
+from datetime import datetime, timedelta
+import requests
+import psycopg2
+from pytz import timezone
+
+# Define the desired timezone (e.g., 'Asia/Ho_Chi_Minh')
+desired_timezone = timezone('Asia/Ho_Chi_Minh')
+
+default_args = {
+    'start_date': datetime(2023, 10, 1, tzinfo=desired_timezone),
+    'end_date': None,
+    'retries': 5,
+    'retry_delay': timedelta(minutes=10)
+}
+
+# BLOCK1: Built-in Pythoncallables
+def pandas_get_data_kiotviet(**kwargs):
+
+    #### Input here! ####
+    client_id = '185f55ca-f98f-40ba-aeab-3d1993526fe8'
+    client_secret = '11E95131B009BEAE50A7FC967FB0D68FF1D86727'
+    kiotviet_store_name = 'tuuushirt'
+    ####
+
+    """
+    *********** FUNCTION GUIDELINES ***********
+    * Main infomation:
+    Name: pandas_get_data_kiotviet
+    Used for: Get data from a KiotViet POS system into a Pandas Dataframe
+    Conditions to use: 
+        (1) Connection already set-up on Apache Airflow, you can check on the Airflow server with the command 'airflow connections list'
+        (2) PostgreSQL Database server is on
+        (3) The connection works fine
+
+    * Parameters:
+    param client_id: this is a unique string for each individual shop owner on KiotViet POS system, you need to get this info on KiotViet UI (configue store)
+    param client_secret: this is a security string for each individual shop owner on KiotViet POS system, you need to get this info on KiotViet UI (configue store)
+    param kiotviet_store_name: the store name displayed on UI
+    """
+
+    #### Default Code ####
+    ## Call API to get Access Token ##
+    # Input endpoint and pre-condition
+    api_endpoint = 'https://id.kiotviet.vn/connect/token'
+    body = f'scopes=PublicApi.Access&grant_type=client_credentials&client_id={client_id}&client_secret={client_secret}'
+
+    # Set up the headers with the authentication token
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+
+    # Make a POST request to the KiotViet API
+    response = requests.post(api_endpoint, data=body, headers=headers)
+
+    # API call was successful, parse and use the response data
+    data = response.json()
+
+    # Get the Access Token
+    access_token = data['access_token']
+
+    ## Call API to get data Transaction ##
+    # Input endpoint and pre-condition
+    api_endpoint = 'https://public.kiotapi.com/invoices'
+    api_key = access_token
+
+    # Set up the headers with the authentication token
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Retailer': f'{kiotviet_store_name}'
+    }
+
+    # Make a GET request to the KiotViet API
+    response = requests.get(api_endpoint, headers=headers)
+
+    # API call was successful, parse and use the response data
+    json_data = response.json()
+
+    # Get the json data into a list of dictionary variable
+    json_dict_data = json_data['data']
+
+    # Get data into Pandas DataFrame
+    df_data = pd.DataFrame(json_dict_data)
+
+    #### Configure Output Code ####
+    # Assign output to other dataframe
+    output_df = df_data
+
+    # Push the output data into a temporary stage
+    kwargs['ti'].xcom_push(key='pandas_get_data_kiotviet', value=output_df)
+    ####
+
+def custom_pandas_transform_data(**kwargs):
+
+    #### Custom dataframe here! ####
+    # Get the result of previous task
+    ti = kwargs['ti']
+    pandas_get_data_kiotviet = ti.xcom_pull(task_ids='pandas_get_data_kiotviet', key='pandas_get_data_kiotviet')
+
+    # Assign to an input dataframe
+    input_df = pandas_get_data_kiotviet
+
+    # Rename columns to match columns name on database server
+    transforming_df = input_df.rename(columns=
+                                    {
+                                        'id': 'transaction_id',
+                                        'code': 'pos_code',
+                                        'createdDate': 'transaction_date',
+                                        'branchId': 'store_id',
+                                        'branchName': 'store_name',
+                                        'soldByName': 'staff_name',
+                                        'customerCode': 'customer_id',
+                                        'totalPayment': 'revenue',
+                                        'discount': 'discount',
+                                        'statusValue': 'transaction_status'
+                                    }
+                                    )
+
+    # Parse all the datetime columns from string to datetime data type
+    transforming_df['transaction_date'] = pd.to_datetime(transforming_df['transaction_date'])
+
+    # Drop unnecessary columns
+    transforming_df = transforming_df[['transaction_id', 'pos_code', 'transaction_date', 'store_id', 'store_name', 'staff_name', 'customer_id', 'revenue', 'discount', 'transaction_status']]
+    
+    # Fix columns customer_id
+    transforming_df['customer_id'] = np.where(transforming_df['customer_id'] == '',
+                                                'NaN',
+                                                transforming_df['customer_id']
+                                               )
+
+    # Change dtype
+    transforming_df['transaction_id'] = transforming_df['transaction_id'].astype('string')
+    transforming_df['store_id'] = transforming_df['store_id'].astype('string')
+    ####
+
+    #### Configure Output Code ####
+    # Assign output to other dataframe
+    output_df = transforming_df
+
+    # Push the output data into a temporary stage
+    kwargs['ti'].xcom_push(key='custom_pandas_transform_data', value=output_df)
+
+def postgres_push_data_pandas(**kwargs):
+
+    #### Input here! ####
+    table='transaction_header'
+    conn_id='postgres_db_server_fashion_kiotviet'
+    ####
+
+    """
+    *********** FUNCTION GUIDELINES ***********
+    * Main infomation:
+    Name: postgres_push_data_pandas
+    Used for: Push data from a Pandas Dataframe to the corresponding Postgres table
+    Conditions to use: 
+        (1) Connection already set-up on Apache Airflow, you can check on the Airflow server with the command 'airflow connections list'
+        (2) PostgreSQL Database server is on
+        (3) The connection works fine
+
+    * Parameters:
+    param df_to_append: the input dataframe contains the data that need to be push into Postgres table
+    param conn_id: The connection ID of the connection established between Apache Airflow server and PostgreSQL Database
+    param table: the table to push data in
+    """
+
+    #### Default Code ####
+    # Get the result of previous task
+    ti = kwargs['ti']
+    custom_pandas_transform_data = ti.xcom_pull(task_ids='custom_pandas_transform_data', key='custom_pandas_transform_data')
+
+    # Assign to an input dataframe
+    df_to_append = custom_pandas_transform_data
+
+    # Init connection
+    pg_hook = PostgresHook(postgres_conn_id=conn_id)
+    conn = pg_hook.get_conn()
+    cursor = conn.cursor()
+
+    # Iterate through rows in the DataFrame and perform upsert
+    for index, row in df_to_append.iterrows():
+        # Define the SQL query for upsert
+        upsert_query = f"""
+            INSERT INTO transaction_header (transaction_id, pos_code, transaction_date, store_id, store_name, staff_name, customer_id, revenue, discount, transaction_status)
+            VALUES (%s, 
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END,
+                    CASE WHEN %s = '1900-01-01 00:00:00'::timestamp THEN NULL ELSE %s END,
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END,
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END,
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END,
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END,
+                    CASE WHEN %s != 'NaN' THEN %s ELSE NULL END,
+                    CASE WHEN %s != 'NaN' THEN %s ELSE NULL END,
+                    CASE WHEN %s = 'NaN' THEN NULL ELSE %s END)
+            ON CONFLICT (transaction_id) DO UPDATE
+            SET pos_code = EXCLUDED.pos_code,
+                transaction_date = CASE WHEN EXCLUDED.transaction_date = '1900-01-01 00:00:00'::timestamp THEN NULL ELSE EXCLUDED.transaction_date END,
+                store_id = CASE WHEN EXCLUDED.store_id = 'NaN' THEN NULL ELSE EXCLUDED.store_id END,
+                store_name = CASE WHEN EXCLUDED.store_name = 'NaN' THEN NULL ELSE EXCLUDED.store_name END,
+                staff_name = CASE WHEN EXCLUDED.staff_name = 'NaN' THEN NULL ELSE EXCLUDED.staff_name END,
+                customer_id = CASE WHEN EXCLUDED.customer_id = 'NaN' THEN NULL ELSE EXCLUDED.customer_id END,
+                revenue = CASE WHEN EXCLUDED.revenue != 'NaN' THEN EXCLUDED.revenue ELSE NULL END,
+                discount = CASE WHEN EXCLUDED.discount != 'NaN' THEN EXCLUDED.discount ELSE NULL END,
+                transaction_status = CASE WHEN EXCLUDED.transaction_status = 'NaN' THEN NULL ELSE EXCLUDED.transaction_status END
+            ;
+        """
+
+        # Handle NaT values by converting them to None
+        transaction_date = row['transaction_date']
+        if pd.isna(transaction_date):
+            transaction_date = pd.Timestamp(1900, 1, 1)
+        
+        # Execute the upsert query
+        cursor.execute(
+            upsert_query, 
+            (
+                row['transaction_id'], 
+                row['pos_code'], row['pos_code'], 
+                transaction_date, transaction_date, 
+                row['store_id'], row['store_id'],
+                row['store_name'], row['store_name'],
+                row['staff_name'], row['staff_name'],
+                row['customer_id'], row['customer_id'], 
+                row['revenue'], row['revenue'],
+                row['discount'], row['discount'], 
+                row['transaction_status'], row['transaction_status']
+            )
+        )
+
+    # Commit changes to the database
+    conn.commit()
+
+    # Close the cursor and the PostgreSQL connection
+    cursor.close()
+    conn.close()
+    ####
+
+    #### Configure Output Code ####
+    ####
+
+# BLOCK2: Build DAGs
+with DAG('intergration_dataflow_kiotviet__transaction_header__', schedule_interval='30 5 * * *', default_args=default_args, catchup=False) as dag:
+    pandas_get_data_kiotviet = PythonOperator(
+        task_id='pandas_get_data_kiotviet',
+        python_callable=pandas_get_data_kiotviet
+    )
+
+    custom_pandas_transform_data = PythonOperator(
+        task_id='custom_pandas_transform_data',
+        python_callable=custom_pandas_transform_data
+    )
+
+    postgres_push_data_pandas = PythonOperator(
+        task_id='postgres_push_data_pandas',
+        python_callable=postgres_push_data_pandas
+    )
+
+    pandas_get_data_kiotviet >> custom_pandas_transform_data >> postgres_push_data_pandas
